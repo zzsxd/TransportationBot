@@ -40,9 +40,24 @@ def main():
             elif state == 'awaiting_broadcast_group':
                 frontend.handle_broadcast_group(message)
                 return
+            elif state == 'awaiting_group_name':
+                frontend._handle_group_name(message)
+                return
+            elif state == 'awaiting_driver_phone':
+                frontend.handle_driver_registration(message)
+                return
+            elif state == 'awaiting_group_remove':
+                frontend._handle_group_remove_confirmation(message)
+                return
         
         if message.text in ["📊 Пользователи Excel", "🚚 Водители Excel", "⬅️ Назад"]:
             frontend.handle_export_excel_choice(message)
+            return
+        elif message.text in ["👥 Управление группами", "➕ Добавить группу", "➖ Удалить группу", "📋 Список групп"]:
+            frontend.handle_admin_commands(message)
+            return
+        elif message.text.startswith("❌ "):
+            frontend._handle_group_remove(message)
             return
         
         if frontend.is_admin(user_id, username):
@@ -56,6 +71,10 @@ def main():
         
         if state == 'awaiting_broadcast_photos' and frontend.is_admin(user_id, username):
             frontend.handle_broadcast_photos(message)
+
+    @bot.message_handler(content_types=['contact'])
+    def handle_contact(message):
+        frontend.handle_contact(message)
     
     @bot.callback_query_handler(func=lambda call: call.data.startswith('accept_order_'))
     def handle_callback(call):
@@ -64,6 +83,11 @@ def main():
     @bot.callback_query_handler(func=lambda call: call.data.startswith('remove_driver_'))
     def handle_remove_driver(call):
         frontend.handle_remove_driver(call)
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith('remove_group_'))
+    def handle_remove_group(call):
+        frontend.handle_remove_group(call)
+
     
     print("Бот запущен...")
     bot.polling(none_stop=True)

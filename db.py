@@ -18,7 +18,16 @@ class Database:
                     username TEXT,
                     first_name TEXT,
                     last_name TEXT,
+                    phone TEXT,
                     role TEXT DEFAULT 'user',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS groups (
+                    group_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_name TEXT NOT NULL UNIQUE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -28,9 +37,10 @@ class Database:
                     user_id INTEGER PRIMARY KEY,
                     full_name TEXT NOT NULL,
                     phone TEXT NOT NULL,
-                    group_type TEXT NOT NULL CHECK(group_type IN ('3_ton', '5_ton', '5+_ton')),
+                    group_id INTEGER, -- Меняем group_type на group_id
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES users (user_id)
+                    FOREIGN KEY (user_id) REFERENCES users (user_id),
+                    FOREIGN KEY (group_id) REFERENCES groups (group_id)
                 )
             ''')
             
@@ -39,10 +49,11 @@ class Database:
                     order_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     admin_id INTEGER NOT NULL,
                     description TEXT NOT NULL,
-                    group_type TEXT NOT NULL CHECK(group_type IN ('3_ton', '5_ton', '5+_ton')),
-                    photos TEXT, -- JSON массив с file_id фотографий
+                    group_id INTEGER, -- Меняем group_type на group_id
+                    photos TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (admin_id) REFERENCES users (user_id)
+                    FOREIGN KEY (admin_id) REFERENCES users (user_id),
+                    FOREIGN KEY (group_id) REFERENCES groups (group_id)
                 )
             ''')
             
@@ -82,10 +93,16 @@ class Database:
             cursor.execute(query, params)
             return [dict(row) for row in cursor.fetchall()]
     
-    def add_user(self, user_id: int, username: str, first_name: str, last_name: str, role: str = 'user'):
+    def add_user(self, user_id: int, username: str, first_name: str, last_name: str, phone: str = None, role: str = 'user'):
         self.execute(
-            "INSERT OR REPLACE INTO users (user_id, username, first_name, last_name, role) VALUES (?, ?, ?, ?, ?)",
-            (user_id, username, first_name, last_name, role)
+            "INSERT OR REPLACE INTO users (user_id, username, first_name, last_name, phone, role) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, username, first_name, last_name, phone, role)
+        )
+    
+    def update_user_phone(self, user_id: int, phone: str):
+        self.execute(
+            "UPDATE users SET phone = ? WHERE user_id = ?",
+            (phone, user_id)
         )
     
     def get_user(self, user_id: int) -> Optional[Dict]:
@@ -94,14 +111,14 @@ class Database:
     def get_all_users(self) -> List[Dict]:
         return self.fetch_all("SELECT * FROM users")
     
-    def add_driver(self, user_id: int, full_name: str, phone: str, group_type: str):
+    def add_driver(self, user_id: int, full_name: str, phone: str, group_id: int):
         user = self.get_user(user_id)
         if not user:
             pass
         
         self.execute(
-            "INSERT OR REPLACE INTO drivers (user_id, full_name, phone, group_type) VALUES (?, ?, ?, ?)",
-            (user_id, full_name, phone, group_type)
+            "INSERT OR REPLACE INTO drivers (user_id, full_name, phone, group_id) VALUES (?, ?, ?, ?)",
+            (user_id, full_name, phone, group_id)
         )
         self.execute("UPDATE users SET role = 'driver' WHERE user_id = ?", (user_id,))
     
@@ -110,6 +127,9 @@ class Database:
             "SELECT d.*, u.username FROM drivers d JOIN users u ON d.user_id = u.user_id WHERE d.user_id = ?",
             (user_id,)
         )
+    
+    def get_user_by_phone(self, phone: str) -> Optional[Dict]:
+        return self.fetch_one("SELECT * FROM users WHERE phone = ?", (phone,))
     
     def get_drivers_by_group(self, group_type: str) -> List[Dict]:
         return self.fetch_all(
@@ -122,11 +142,11 @@ class Database:
             "SELECT d.*, u.username FROM drivers d JOIN users u ON d.user_id = u.user_id"
         )
 
-    def add_order(self, admin_id: int, description: str, group_type: str, photos: List[str]) -> int:
+    def add_order(self, admin_id: int, description: str, group_id: int, photos: List[str]) -> int:
         photos_json = json.dumps(photos)
         cursor = self.execute(
-            "INSERT INTO orders (admin_id, description, group_type, photos) VALUES (?, ?, ?, ?)",
-            (admin_id, description, group_type, photos_json)
+            "INSERT INTO orders (admin_id, description, group_id, photos) VALUES (?, ?, ?, ?)",
+            (admin_id, description, group_id, photos_json)
         )
         return cursor.lastrowid
     
@@ -161,4 +181,36 @@ class Database:
                ORDER BY r.accepted_at DESC 
                LIMIT ?""",
             (driver_id, limit)
+        )
+    
+
+    def add_group(self, group_name: str) -> int:
+        cursor = self.execute(
+            "INSERT INTO groups (group_name) VALUES (?)",
+            (group_name,)
+        )
+        return cursor.lastrowid
+
+    def get_group(self, group_id: int) -> Optional[Dict]:
+        return self.fetch_one("SELECT * FROM groups WHERE group_id = ?", (group_id,))
+
+    def get_group_by_name(self, group_name: str) -> Optional[Dict]:
+        return self.fetch_one("SELECT * FROM groups WHERE group_name = ?", (group_name,))
+
+    def get_all_groups(self) -> List[Dict]:
+        return self.fetch_all("SELECT * FROM groups ORDER BY group_name")
+
+    def delete_group(self, group_id: int):
+        self.execute("DELETE FROM groups WHERE group_id = ?", (group_id,))
+
+    def update_driver_group(self, user_id: int, group_id: int):
+        self.execute(
+            "UPDATE drivers SET group_id = ? WHERE user_id = ?",
+            (group_id, user_id)
+        )
+
+    def get_drivers_by_group(self, group_id: int) -> List[Dict]:
+        return self.fetch_all(
+            "SELECT d.*, u.username FROM drivers d JOIN users u ON d.user_id = u.user_id WHERE d.group_id = ?",
+            (group_id,)
         )

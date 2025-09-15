@@ -11,22 +11,26 @@ class Backend:
     def __init__(self):
         self.db = Database()
     
-    def register_user(self, user_id: int, username: str, first_name: str, last_name: str, role: str = 'user'):
+    def register_user(self, user_id: int, username: str, first_name: str, last_name: str, phone: str = None, role: str = 'user'):
         existing_user = self.db.get_user(user_id)
         if existing_user:
             self.db.execute(
-                "UPDATE users SET username = ?, first_name = ?, last_name = ? WHERE user_id = ?",
-                (username, first_name, last_name, user_id)
+                "UPDATE users SET username = ?, first_name = ?, last_name = ?, phone = ? WHERE user_id = ?",
+                (username, first_name, last_name, phone, user_id)
             )
         else:
-            self.db.add_user(user_id, username, first_name, last_name, role)
+            self.db.add_user(user_id, username, first_name, last_name, phone, role)
+
+    def update_user_phone(self, user_id: int, phone: str):
+        self.db.update_user_phone(user_id, phone)
     
     def get_user_role(self, user_id: int) -> Optional[str]:
         user = self.db.get_user(user_id)
         return user.get('role') if user else None
     
-    def register_driver(self, user_id: int, full_name: str, phone: str, group_type: str):
-        self.db.add_driver(user_id, full_name, phone, group_type)
+
+    def get_user_by_phone(self, phone: str) -> Optional[Dict]:
+        return self.db.get_user_by_phone(phone)
     
     def remove_driver(self, username: str) -> bool:
         user = self.db.fetch_one("SELECT user_id FROM users WHERE username = ?", (username,))
@@ -44,19 +48,18 @@ class Backend:
         return True
     
     def get_driver_info(self, user_id: int) -> Optional[Dict]:
-        return self.db.get_driver(user_id)
+        driver = self.db.get_driver(user_id)
+        if driver and driver.get('group_id'):
+            group = self.db.get_group(driver['group_id'])
+            if group:
+                driver['group_name'] = group['group_name']
+        return driver
     
     def get_driver_by_username(self, username: str) -> Optional[Dict]:
         return self.db.fetch_one(
             "SELECT d.*, u.username FROM drivers d JOIN users u ON d.user_id = u.user_id WHERE u.username = ?",
             (username,)
         )
-    
-    def get_drivers_by_group(self, group_type: str) -> List[Dict]:
-        return self.db.get_drivers_by_group(group_type)
-    
-    def create_order(self, admin_id: int, description: str, group_type: str, photos: List[str]) -> int:
-        return self.db.add_order(admin_id, description, group_type, photos)
     
     def accept_order(self, order_id: int, driver_id: int) -> bool:
         responses = self.db.get_order_responses(order_id)
@@ -161,14 +164,20 @@ class Backend:
             cell.alignment = Alignment(horizontal='center')
         
         for row_num, driver in enumerate(drivers, 2):
+            group_name = "Не указана"
+            if driver.get('group_id'):
+                group = self.db.get_group(driver['group_id'])
+                if group:
+                    group_name = group['group_name']
+            
             ws.cell(row=row_num, column=1, value=driver['user_id'])
             ws.cell(row=row_num, column=2, value=f"@{driver['username']}" if driver['username'] else "")
             ws.cell(row=row_num, column=3, value=driver['full_name'])
             ws.cell(row=row_num, column=4, value=driver['phone'])
-            ws.cell(row=row_num, column=5, value=self._get_group_name(driver['group_type']))
+            ws.cell(row=row_num, column=5, value=group_name)
             ws.cell(row=row_num, column=6, value=driver['created_at'])
         
-        column_widths = [10, 15, 25, 15, 10, 20]
+        column_widths = [10, 15, 25, 15, 15, 20]
         for i, width in enumerate(column_widths, 1):
             ws.column_dimensions[get_column_letter(i)].width = width
         
@@ -196,10 +205,16 @@ class Backend:
         
         result = "Список водителей:\n\n"
         for driver in drivers:
+            group_name = "Не указана"
+            if driver.get('group_id'):
+                group = self.db.get_group(driver['group_id'])
+                if group:
+                    group_name = group['group_name']
+            
             result += f"ID: {driver['user_id']}\n"
             result += f"ФИО: {driver['full_name']}\n"
             result += f"Телефон: {driver['phone']}\n"
-            result += f"Группа: {self._get_group_name(driver['group_type'])}\n"
+            result += f"Группа: {group_name}\n"
             result += f"Username: @{driver['username']}\n"
             result += "─" * 30 + "\n"
         
@@ -212,3 +227,51 @@ class Backend:
             '5+_ton': '5+ тонн'
         }
         return group_names.get(group_type, group_type)
+    
+    def register_driver_by_phone(self, phone: str, full_name: str, group_type: str) -> bool:
+        """
+        Регистрирует водителя по номеру телефона
+        Возвращает True если успешно, False если номер не найден среди пользователей
+        """
+        user = self.db.fetch_one(
+            "SELECT u.user_id, u.username FROM users u JOIN drivers d ON u.user_id = d.user_id WHERE d.phone = ?",
+            (phone,)
+        )
+        
+        if not user:
+            return False
+        
+        self.db.execute(
+            "UPDATE drivers SET full_name = ?, group_type = ? WHERE user_id = ?",
+            (full_name, group_type, user['user_id'])
+        )
+        
+        return True
+    
+    def get_driver_by_phone(self, phone: str) -> Optional[Dict]:
+        return self.db.fetch_one(
+            "SELECT d.*, u.username FROM drivers d JOIN users u ON d.user_id = u.user_id WHERE d.phone = ?",
+            (phone,)
+        )
+    
+
+    def add_group(self, group_name: str) -> int:
+        return self.db.add_group(group_name)
+
+    def get_all_groups(self) -> List[Dict]:
+        return self.db.get_all_groups()
+
+    def delete_group(self, group_id: int):
+        self.db.delete_group(group_id)
+
+    def get_group_by_name(self, group_name: str) -> Optional[Dict]:
+        return self.db.get_group_by_name(group_name)
+
+    def register_driver(self, user_id: int, full_name: str, phone: str, group_id: int):
+        self.db.add_driver(user_id, full_name, phone, group_id)
+
+    def get_drivers_by_group(self, group_id: int) -> List[Dict]:
+        return self.db.get_drivers_by_group(group_id)
+
+    def create_order(self, admin_id: int, description: str, group_id: int, photos: List[str]) -> int:
+        return self.db.add_order(admin_id, description, group_id, photos)
