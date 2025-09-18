@@ -12,9 +12,16 @@ class Frontend:
         self.backend = Backend()
         self.config = ConfigParser()
         self.admin_ids = self.config.get_admin_ids()
+        self.group_id = self.config.get_group_id()
         
         self.user_states = {}
         self.temp_data = {}
+
+    def clear_user_state(self, user_id: int):
+        if user_id in self.user_states:
+            del self.user_states[user_id]
+        if user_id in self.temp_data:
+            del self.temp_data[user_id]
     
     def is_admin(self, user_id: int, username: str) -> bool:
         return self.config.is_admin(user_id, username)
@@ -24,6 +31,8 @@ class Frontend:
         username = message.from_user.username
         first_name = message.from_user.first_name
         last_name = message.from_user.last_name or ""
+        
+        self.clear_user_state(user_id)
         
         self.backend.register_user(user_id, username, first_name, last_name)
 
@@ -109,8 +118,6 @@ class Frontend:
             reply_markup=markup
         )
 
-    
-    
     def _show_driver_menu(self, message: types.Message):
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
         markup.add("📋 Мои заказы")
@@ -178,7 +185,7 @@ class Frontend:
         
         self.bot.send_message(
             message.chat.id,
-            "👥 Управление группами водителей\n\n"
+            "👥 Управление группыми водителей\n\n"
             "Выберите действие:",
             reply_markup=markup
         )
@@ -579,10 +586,16 @@ class Frontend:
         self.user_states[user_id] = 'awaiting_broadcast_photos'
         self.temp_data[user_id] = {'photos': []}
         
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add("❌ Отмена")
+        
         self.bot.send_message(
             message.chat.id,
-            "Отправьте до 6 фотографий для рассылки (или отправьте /skip чтобы пропустить):"
+            "Отправьте до 6 фотографий для рассылки (или отправьте /skip чтобы пропустить):\n\n"
+            "Для отмены нажмите '❌ Отмена'",
+            reply_markup=markup
         )
+
     
     def handle_broadcast_photos(self, message: types.Message):
         user_id = message.from_user.id
@@ -594,6 +607,11 @@ class Frontend:
                 del self.user_states[user_id]
             if user_id in self.temp_data:
                 del self.temp_data[user_id]
+            return
+        
+        if message.text == "❌ Отмена":
+            self.clear_user_state(user_id)
+            self._show_admin_menu(message)
             return
         
         if self.user_states.get(user_id) == 'awaiting_broadcast_photos':
@@ -669,21 +687,50 @@ class Frontend:
             group_name = message.text.strip()
             
             data = self.temp_data.get(user_id, {})
-            text = data.get('text', '')
-            photos = data.get('photos', [])
+            data['group_name'] = group_name
+            self.temp_data[user_id] = data
+            
+            self.user_states[user_id] = 'awaiting_topic_name'
+            self.bot.send_message(
+                message.chat.id,
+                "Введите название заказа для топика:",
+                reply_markup=types.ReplyKeyboardRemove()
+            )
+    
+    def handle_topic_name(self, message: types.Message):
+        user_id = message.from_user.id
+        username = message.from_user.username
+        
+        if not self.is_admin(user_id, username):
+            self.bot.send_message(message.chat.id, "🚫 У вас нет прав администратора")
+            if user_id in self.user_states:
+                del self.user_states[user_id]
+            if user_id in self.temp_data:
+                del self.temp_data[user_id]
+            return
+        
+        if self.user_states.get(user_id) == 'awaiting_topic_name':
+            topic_name = message.text.strip()
+            data = self.temp_data.get(user_id, {})
             
             try:
-                if group_name == "Все группы":
-                    order_id = self.backend.create_order(user_id, text, None, photos)
-                    self._send_broadcast_to_all_groups(order_id, text, photos)
+                if data.get('group_name') == "Все группы":
+                    order_id = self.backend.create_order_with_topic(
+                        user_id, data['text'], None, data['photos'], topic_name
+                    )
+                    self._send_broadcast_to_all_groups(order_id, data['text'], data['photos'], topic_name)
                 else:
-                    group = self.backend.get_group_by_name(group_name)
+                    group = self.backend.get_group_by_name(data['group_name'])
                     if not group:
                         self.bot.send_message(message.chat.id, "❌ Группа не найдена")
                         return
                     
-                    order_id = self.backend.create_order(user_id, text, group['group_id'], photos)
-                    self._send_broadcast_to_group(order_id, group['group_id'], text, photos)
+                    order_id = self.backend.create_order_with_topic(
+                        user_id, data['text'], group['group_id'], data['photos'], topic_name
+                    )
+                    self._send_broadcast_to_group(order_id, group['group_id'], data['text'], data['photos'], topic_name)
+                
+                self._create_topic_in_group(topic_name, order_id, data['text'], data['photos'])
                 
                 del self.user_states[user_id]
                 del self.temp_data[user_id]
@@ -691,7 +738,8 @@ class Frontend:
                 markup = types.ReplyKeyboardRemove()
                 self.bot.send_message(
                     message.chat.id,
-                    f"✅ Рассылка отправлена группе '{group_name}'",
+                    f"✅ Рассылка отправлена группе '{data.get('group_name', 'Все группы')}'\n"
+                    f"Топик '{topic_name}' создан в группе",
                     reply_markup=markup
                 )
                 self._show_admin_menu(message)
@@ -699,45 +747,276 @@ class Frontend:
             except Exception as e:
                 self.bot.send_message(message.chat.id, f"❌ Ошибка при отправке рассылки: {str(e)}")
     
-    def _send_broadcast(self, order_id: int, group_type: str, text: str, photos: List[str]):
-        if group_type == 'all':
-            all_drivers = []
-            groups = self.backend.get_all_groups()
-            for group in groups:
-                drivers = self.backend.get_drivers_by_group(group['group_id'])
-                all_drivers.extend(drivers)
-            drivers = all_drivers
-        else:
-            group = self.backend.get_group_by_name(group_type)
-            if not group:
-                print(f"Группа '{group_type}' не найдена")
-                return
-            drivers = self.backend.get_drivers_by_group(group['group_id'])
+    def _create_topic_in_group(self, topic_name: str, order_id: int, text: str, photos: List[str]):
+        if not self.group_id:
+            print("❌ Group ID не указан в конфигурации")
+            return
         
+        try:
+            topic_result = self.bot.create_forum_topic(
+                self.group_id,
+                f"Заказ #{order_id}: {topic_name}"
+            )
+            
+            if not topic_result or not hasattr(topic_result, 'message_thread_id'):
+                print("❌ Не удалось создать топик")
+                self._send_to_group_without_topic(order_id, text, photos, topic_name)
+                return
+            
+            topic_id = topic_result.message_thread_id
+            
+            self.backend.db.execute(
+                "UPDATE orders SET topic_id = ? WHERE order_id = ?",
+                (topic_id, order_id)
+            )
+            
+            message_text = f"📦 Заказ #{order_id}: {topic_name}\n\n{text}"
+            
+            if photos:
+                media = [types.InputMediaPhoto(photo, caption=message_text if i == 0 else "") 
+                        for i, photo in enumerate(photos)]
+                self.bot.send_media_group(
+                    self.group_id,
+                    media,
+                    message_thread_id=topic_id
+                )
+            else:
+                self.bot.send_message(
+                    self.group_id,
+                    message_text,
+                    message_thread_id=topic_id
+                )
+                
+            print(f"✅ Топик создан: {topic_name} (ID: {topic_id})")
+            
+        except Exception as e:
+            print(f"❌ Ошибка при создании топика: {e}")
+            self._send_to_group_without_topic(order_id, text, photos, topic_name)
+
+    def _send_to_group_without_topic(self, order_id: int, text: str, photos: List[str], topic_name: str):
+        try:
+            message_text = f"📦 Заказ #{order_id}: {topic_name}\n\n{text}"
+            if photos:
+                media = [types.InputMediaPhoto(photo, caption=message_text if i == 0 else "") 
+                        for i, photo in enumerate(photos)]
+                self.bot.send_media_group(self.group_id, media)
+            else:
+                self.bot.send_message(self.group_id, message_text)
+            print(f"✅ Заказ отправлен в общий чат группы")
+        except Exception as e:
+            print(f"❌ Ошибка при отправке в общий чат: {e}")
+    
+
+    def send_offer_to_topic(self, order_id: int, driver_info: Dict, price: float):
+        if not self.group_id:
+            return
+        
+        try:
+            order = self.backend.get_order_info(order_id)
+            if not order or not order.get('topic_id'):
+                return
+            
+            offer_message = (
+                f"💵 Новое предложение по заказу #{order_id} - {order.get('topic_name', 'Без названия')}\n\n"
+                f"Водитель: {driver_info['full_name']}\n"
+                f"Телефон: {driver_info['phone']}\n"
+                f"Username: @{driver_info['username']}\n"
+                f"Цена: {price} руб.\n\n"
+                f"Заказ: {order['description'][:100]}..."
+            )
+            
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton(
+                "✅ Принять предложение",
+                callback_data=f"accept_offer_{order_id}_{driver_info['user_id']}"
+            ))
+            
+            self.bot.send_message(
+                self.group_id,
+                offer_message,
+                reply_markup=markup,
+                message_thread_id=order['topic_id']
+            )
+            
+        except Exception as e:
+            print(f"❌ Ошибка при отправке предложения в топик: {e}")
+            try:
+                order = self.backend.get_order_info(order_id)
+                offer_message = (
+                    f"💵 Новое предложение по заказу #{order_id} - {order.get('topic_name', 'Без названия')}\n\n"
+                    f"Водитель: {driver_info['full_name']}\n"
+                    f"Телефон: {driver_info['phone']}\n"
+                    f"Username: @{driver_info['username']}\n"
+                    f"Цена: {price} руб."
+                )
+                
+                markup = types.InlineKeyboardMarkup()
+                markup.add(types.InlineKeyboardButton(
+                    "✅ Принять предложение",
+                    callback_data=f"accept_offer_{order_id}_{driver_info['user_id']}"
+                ))
+                
+                self.bot.send_message(self.group_id, offer_message, reply_markup=markup)
+            except Exception as e2:
+                print(f"❌ Ошибка при отправке в общий чат: {e2}")
+
+    def _send_broadcast_to_group(self, order_id: int, group_id: int, text: str, photos: List[str], topic_name: str):
+        drivers = self.backend.get_drivers_by_group(group_id)
+        self._send_to_drivers(drivers, order_id, text, photos, topic_name)
+
+    def _send_broadcast_to_all_groups(self, order_id: int, text: str, photos: List[str], topic_name: str):
+        all_drivers = []
+        groups = self.backend.get_all_groups()
+        for group in groups:
+            drivers = self.backend.get_drivers_by_group(group['group_id'])
+            all_drivers.extend(drivers)
+        self._send_to_drivers(all_drivers, order_id, text, photos, topic_name)
+
+    def _send_to_drivers(self, drivers: List[Dict], order_id: int, text: str, photos: List[str], topic_name: str):
         for driver in drivers:
             try:
                 if photos:
                     media = [types.InputMediaPhoto(photo) for photo in photos]
-                    media[0].caption = f"📦 Новый заказ #{order_id}:\n\n{text}"
+                    media[0].caption = f"📦 Новый заказ #{order_id} - {topic_name}:\n\n{text}"
                     self.bot.send_media_group(driver['user_id'], media)
                 else:
-                    self.bot.send_message(driver['user_id'], f"📦 Новый заказ #{order_id}:\n\n{text}")
+                    self.bot.send_message(
+                        driver['user_id'], 
+                        f"📦 Новый заказ #{order_id} - {topic_name}:\n\n{text}"
+                    )
                 
-                markup = types.InlineKeyboardMarkup()
-                markup.add(types.InlineKeyboardButton(
-                    "✅ Взять заказ",
-                    callback_data=f"accept_order_{order_id}"
-                ))
+                if driver['user_id'] not in self.temp_data:
+                    self.temp_data[driver['user_id']] = {}
+                self.temp_data[driver['user_id']]['current_order'] = order_id
+                self.temp_data[driver['user_id']]['current_topic'] = topic_name
+                
+                markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+                markup.add("💵 Предложить цену")
                 
                 self.bot.send_message(
                     driver['user_id'],
-                    "Нажмите кнопку чтобы взять заказ:",
+                    "Нажмите кнопку чтобы предложить свою цену за заказ:",
                     reply_markup=markup
                 )
                 
             except Exception as e:
                 print(f"Ошибка при отправке рассылки водителю {driver['user_id']}: {e}")
-    
+
+    def handle_driver_price_request(self, message: types.Message):
+        user_id = message.from_user.id
+        driver = self.backend.get_driver_info(user_id)
+        
+        if not driver:
+            self.bot.send_message(message.chat.id, "❌ Вы не являетесь водителем")
+            return
+        
+        if user_id not in self.temp_data or 'current_order' not in self.temp_data[user_id]:
+            self.bot.send_message(message.chat.id, "❌ Нет активного заказа для предложения цены")
+            return
+        
+        order_id = self.temp_data[user_id]['current_order']
+        self.user_states[user_id] = f'awaiting_price_{order_id}'
+        
+        self.bot.send_message(
+            message.chat.id,
+            "Введите вашу цену за заказ:",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+
+    def handle_driver_price(self, message: types.Message):
+        user_id = message.from_user.id
+        driver = self.backend.get_driver_info(user_id)
+        
+        if not driver:
+            self.bot.send_message(message.chat.id, "❌ Вы не являетесь водителем")
+            return
+        
+        if user_id in self.user_states and self.user_states[user_id].startswith('awaiting_price_'):
+            try:
+                price = float(message.text)
+                order_id = int(self.user_states[user_id].split('_')[2])
+                
+                self.backend.add_driver_offer(order_id, user_id, price)
+                
+                self.send_offer_to_topic(order_id, driver, price)
+                
+                self.bot.send_message(
+                    message.chat.id,
+                    f"✅ Ваше предложение {price} руб. отправлено администратору"
+                )
+                
+                self.clear_user_state(user_id)
+                
+            except ValueError:
+                self.bot.send_message(message.chat.id, "❌ Пожалуйста, введите корректную цену (число)")
+        else:
+            self.bot.send_message(message.chat.id, "❌ Нет активного запроса на цену")
+
+    def handle_accept_offer(self, call: types.CallbackQuery):
+        parts = call.data.split('_')
+        order_id = int(parts[2])
+        driver_id = int(parts[3])
+        
+        user_id = call.from_user.id
+        username = call.from_user.username
+        
+        if not self.is_admin(user_id, username):
+            self.bot.answer_callback_query(call.id, "🚫 У вас нет прав администратора")
+            return
+        
+        offers = self.backend.get_order_offers(order_id)
+        offer_id = None
+        for offer in offers:
+            if offer['driver_id'] == driver_id:
+                offer_id = offer['offer_id']
+                break
+        
+        if not offer_id:
+            self.bot.answer_callback_query(call.id, "❌ Предложение не найдено")
+            return
+        
+        success = self.backend.accept_driver_offer(offer_id)
+        
+        if success:
+            self.bot.answer_callback_query(call.id, "✅ Предложение принято")
+            self.bot.edit_message_text(
+                "✅ Предложение принято",
+                call.message.chat.id,
+                call.message.message_id
+            )
+            
+            try:
+                self.bot.send_message(
+                    driver_id,
+                    f"✅ Ваше предложение по заказу #{order_id} принято! Заказ закреплен за вами."
+                )
+            except:
+                pass
+            
+            if self.group_id:
+                order = self.backend.get_order_info(order_id)
+                driver = self.backend.get_driver_info(driver_id)
+                
+                if order and driver:
+                    completion_message = (
+                        f"✅ Заказ #{order_id} - {order.get('topic_name', 'Без названия')} выполнен!\n\n"
+                        f"Водитель: {driver['full_name']}\n"
+                        f"Телефон: {driver['phone']}\n"
+                        f"Username: @{driver['username']}\n"
+                        f"Заказ: {order['description'][:100]}..."
+                    )
+                    
+                    try:
+                        self.bot.send_message(
+                            self.group_id,
+                            completion_message,
+                            message_thread_id=order_id
+                        )
+                    except:
+                        self.bot.send_message(self.group_id, completion_message)
+        else:
+            self.bot.answer_callback_query(call.id, "❌ Ошибка при принятии предложения")
+
     def handle_order_accept(self, call: types.CallbackQuery):
         driver_id = call.from_user.id
         order_id = int(call.data.split('_')[2])
@@ -747,74 +1026,12 @@ class Frontend:
             self.bot.answer_callback_query(call.id, "❌ Вы не являетесь водителем")
             return
         
-        if self.backend.is_order_taken(order_id):
-            self.bot.answer_callback_query(
-                call.id, 
-                "❌ Этот заказ уже взят другим водителем",
-                show_alert=True
-            )
-            self.bot.edit_message_reply_markup(
-                call.message.chat.id,
-                call.message.message_id,
-                reply_markup=None
-            )
-            self.bot.send_message(
-                call.message.chat.id,
-                "❌ К сожалению, этот заказ уже взят другим водителем"
-            )
-            return
-        
-        success = self.backend.accept_order(order_id, driver_id)
-        
-        if not success:
-            self.bot.answer_callback_query(
-                call.id, 
-                "❌ Этот заказ уже взят другим водителем",
-                show_alert=True
-            )
-            self.bot.edit_message_reply_markup(
-                call.message.chat.id,
-                call.message.message_id,
-                reply_markup=None
-            )
-            self.bot.send_message(
-                call.message.chat.id,
-                "❌ К сожалению, этот заказ уже взят другим водителем"
-            )
-            return
-        
-        try:
-            order = self.backend.get_order_info(order_id)
-            if order:
-                admin_id = order['admin_id']
-                group_name = driver.get('group_name', 'Не указана')
-                
-                message_text = (
-                    f"✅ Водитель принял заказ #{order_id}:\n\n"
-                    f"Заказ: {order['description'][:100]}...\n"
-                    f"Водитель: {driver['full_name']}\n"
-                    f"Телефон: {driver['phone']}\n"
-                    f"Username: @{driver['username']}\n"
-                    f"Группа: {group_name}\n"
-                    f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                )
-                
-                self.bot.send_message(admin_id, message_text)
-            
-            self.bot.answer_callback_query(call.id, "✅ Заказ принят!")
-            self.bot.edit_message_reply_markup(
-                call.message.chat.id,
-                call.message.message_id,
-                reply_markup=None
-            )
-            self.bot.send_message(
-                call.message.chat.id,
-                "✅ Вы успешно приняли заказ!"
-            )
-            
-        except Exception as e:
-            self.bot.answer_callback_query(call.id, "❌ Ошибка при принятии заказа")
-    
+        self.bot.send_message(
+            driver_id,
+            "ℹ️ Пожалуйста, используйте кнопку '💵 Предложить цену' для участия в заказе"
+        )
+        self.bot.answer_callback_query(call.id, "Используйте кнопку 'Предложить цену'")
+
     def handle_my_orders(self, message: types.Message):
         driver_id = message.from_user.id
         orders = self.backend.get_driver_orders_history(driver_id)
@@ -831,40 +1048,3 @@ class Frontend:
             response += "─" * 30 + "\n"
         
         self.bot.send_message(message.chat.id, response)
-
-    def _send_broadcast_to_group(self, order_id: int, group_id: int, text: str, photos: List[str]):
-        drivers = self.backend.get_drivers_by_group(group_id)
-        self._send_to_drivers(drivers, order_id, text, photos)
-
-    def _send_broadcast_to_all_groups(self, order_id: int, text: str, photos: List[str]):
-        all_drivers = []
-        groups = self.backend.get_all_groups()
-        for group in groups:
-            drivers = self.backend.get_drivers_by_group(group['group_id'])
-            all_drivers.extend(drivers)
-        self._send_to_drivers(all_drivers, order_id, text, photos)
-
-    def _send_to_drivers(self, drivers: List[Dict], order_id: int, text: str, photos: List[str]):
-        for driver in drivers:
-            try:
-                if photos:
-                    media = [types.InputMediaPhoto(photo) for photo in photos]
-                    media[0].caption = f"📦 Новый заказ #{order_id}:\n\n{text}"
-                    self.bot.send_media_group(driver['user_id'], media)
-                else:
-                    self.bot.send_message(driver['user_id'], f"📦 Новый заказ #{order_id}:\n\n{text}")
-                
-                markup = types.InlineKeyboardMarkup()
-                markup.add(types.InlineKeyboardButton(
-                    "✅ Взять заказ",
-                    callback_data=f"accept_order_{order_id}"
-                ))
-                
-                self.bot.send_message(
-                    driver['user_id'],
-                    "Нажмите кнопку чтобы взять заказ:",
-                    reply_markup=markup
-                )
-                
-            except Exception as e:
-                print(f"Ошибка при отправке рассылки водителю {driver['user_id']}: {e}")

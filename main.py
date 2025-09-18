@@ -15,7 +15,25 @@ def main():
     
     @bot.message_handler(commands=['start'])
     def handle_start(message):
+        frontend.clear_user_state(message.from_user.id)
         frontend.handle_start(message)
+
+    @bot.message_handler(commands=['cancel'])
+    def handle_cancel(message):
+        user_id = message.from_user.id
+        frontend.clear_user_state(user_id)
+        
+        if frontend.is_admin(user_id, message.from_user.username):
+            frontend._show_admin_menu(message)
+        else:
+            driver = frontend.backend.get_driver_info(user_id)
+            if driver:
+                frontend._show_driver_menu(message)
+            else:
+                frontend.bot.send_message(
+                    message.chat.id,
+                    "❌ Команда отмены выполнена. Используйте /start для начала работы."
+                )
     
     @bot.message_handler(commands=['my_orders'])
     def handle_my_orders(message):
@@ -40,6 +58,9 @@ def main():
             elif state == 'awaiting_broadcast_group':
                 frontend.handle_broadcast_group(message)
                 return
+            elif state == 'awaiting_topic_name':
+                frontend.handle_topic_name(message)
+                return
             elif state == 'awaiting_group_name':
                 frontend._handle_group_name(message)
                 return
@@ -49,12 +70,18 @@ def main():
             elif state == 'awaiting_group_remove':
                 frontend._handle_group_remove_confirmation(message)
                 return
+            elif state.startswith('awaiting_price_'):
+                frontend.handle_driver_price(message)
+                return
         
         if message.text in ["📊 Пользователи Excel", "🚚 Водители Excel", "⬅️ Назад"]:
             frontend.handle_export_excel_choice(message)
             return
         elif message.text in ["👥 Управление группами", "➕ Добавить группу", "➖ Удалить группу", "📋 Список групп"]:
             frontend.handle_admin_commands(message)
+            return
+        elif message.text == "💵 Предложить цену":
+            frontend.handle_driver_price_request(message)
             return
         elif message.text.startswith("❌ "):
             frontend._handle_group_remove(message)
@@ -88,6 +115,9 @@ def main():
     def handle_remove_group(call):
         frontend.handle_remove_group(call)
 
+    @bot.callback_query_handler(func=lambda call: call.data.startswith('accept_offer_'))
+    def handle_accept_offer(call):
+        frontend.handle_accept_offer(call)
     
     print("Бот запущен...")
     bot.polling(none_stop=True)

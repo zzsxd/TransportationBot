@@ -40,9 +40,8 @@ class Backend:
         driver_user_id = user['user_id']
         
         self.db.execute("DELETE FROM order_responses WHERE driver_id = ?", (driver_user_id,))
-        
+        self.db.execute("DELETE FROM driver_offers WHERE driver_id = ?", (driver_user_id,))
         self.db.execute("DELETE FROM drivers WHERE user_id = ?", (driver_user_id,))
-        
         self.db.execute("UPDATE users SET role = 'user' WHERE user_id = ?", (driver_user_id,))
         
         return True
@@ -220,41 +219,6 @@ class Backend:
         
         return result
     
-    def _get_group_name(self, group_type: str) -> str:
-        group_names = {
-            '3_ton': '3 тонны',
-            '5_ton': '5 тонн',
-            '5+_ton': '5+ тонн'
-        }
-        return group_names.get(group_type, group_type)
-    
-    def register_driver_by_phone(self, phone: str, full_name: str, group_type: str) -> bool:
-        """
-        Регистрирует водителя по номеру телефона
-        Возвращает True если успешно, False если номер не найден среди пользователей
-        """
-        user = self.db.fetch_one(
-            "SELECT u.user_id, u.username FROM users u JOIN drivers d ON u.user_id = d.user_id WHERE d.phone = ?",
-            (phone,)
-        )
-        
-        if not user:
-            return False
-        
-        self.db.execute(
-            "UPDATE drivers SET full_name = ?, group_type = ? WHERE user_id = ?",
-            (full_name, group_type, user['user_id'])
-        )
-        
-        return True
-    
-    def get_driver_by_phone(self, phone: str) -> Optional[Dict]:
-        return self.db.fetch_one(
-            "SELECT d.*, u.username FROM drivers d JOIN users u ON d.user_id = u.user_id WHERE d.phone = ?",
-            (phone,)
-        )
-    
-
     def add_group(self, group_name: str) -> int:
         return self.db.add_group(group_name)
 
@@ -273,5 +237,14 @@ class Backend:
     def get_drivers_by_group(self, group_id: int) -> List[Dict]:
         return self.db.get_drivers_by_group(group_id)
 
-    def create_order(self, admin_id: int, description: str, group_id: int, photos: List[str]) -> int:
-        return self.db.add_order(admin_id, description, group_id, photos)
+    def create_order_with_topic(self, admin_id: int, description: str, group_id: int, photos: List[str], topic_name: str) -> int:
+        return self.db.add_order(admin_id, description, group_id, photos, topic_name)
+
+    def add_driver_offer(self, order_id: int, driver_id: int, price: float, comment: str = None):
+        self.db.add_driver_offer(order_id, driver_id, price, comment)
+
+    def get_order_offers(self, order_id: int) -> List[Dict]:
+        return self.db.get_order_offers(order_id)
+
+    def accept_driver_offer(self, offer_id: int) -> bool:
+        return self.db.accept_driver_offer(offer_id)

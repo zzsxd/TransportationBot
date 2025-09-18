@@ -37,7 +37,7 @@ class Database:
                     user_id INTEGER PRIMARY KEY,
                     full_name TEXT NOT NULL,
                     phone TEXT NOT NULL,
-                    group_id INTEGER, -- Меняем group_type на group_id
+                    group_id INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (user_id) REFERENCES users (user_id),
                     FOREIGN KEY (group_id) REFERENCES groups (group_id)
@@ -49,11 +49,26 @@ class Database:
                     order_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     admin_id INTEGER NOT NULL,
                     description TEXT NOT NULL,
-                    group_id INTEGER, -- Меняем group_type на group_id
+                    group_id INTEGER,
                     photos TEXT,
+                    topic_name TEXT,
+                    topic_id INTEGER,  -- ID топика в группе
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (admin_id) REFERENCES users (user_id),
                     FOREIGN KEY (group_id) REFERENCES groups (group_id)
+                )
+            ''')
+            
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS driver_offers (
+                    offer_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    order_id INTEGER NOT NULL,
+                    driver_id INTEGER NOT NULL,
+                    price REAL NOT NULL,
+                    comment TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (order_id) REFERENCES orders (order_id),
+                    FOREIGN KEY (driver_id) REFERENCES drivers (user_id)
                 )
             ''')
             
@@ -131,22 +146,16 @@ class Database:
     def get_user_by_phone(self, phone: str) -> Optional[Dict]:
         return self.fetch_one("SELECT * FROM users WHERE phone = ?", (phone,))
     
-    def get_drivers_by_group(self, group_type: str) -> List[Dict]:
-        return self.fetch_all(
-            "SELECT d.*, u.username FROM drivers d JOIN users u ON d.user_id = u.user_id WHERE d.group_type = ?",
-            (group_type,)
-        )
-    
     def get_all_drivers(self) -> List[Dict]:
         return self.fetch_all(
             "SELECT d.*, u.username FROM drivers d JOIN users u ON d.user_id = u.user_id"
         )
 
-    def add_order(self, admin_id: int, description: str, group_id: int, photos: List[str]) -> int:
+    def add_order(self, admin_id: int, description: str, group_id: int, photos: List[str], topic_name: str = None, topic_id: int = None) -> int:
         photos_json = json.dumps(photos)
         cursor = self.execute(
-            "INSERT INTO orders (admin_id, description, group_id, photos) VALUES (?, ?, ?, ?)",
-            (admin_id, description, group_id, photos_json)
+            "INSERT INTO orders (admin_id, description, group_id, photos, topic_name, topic_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (admin_id, description, group_id, photos_json, topic_name, topic_id)
         )
         return cursor.lastrowid
     
@@ -156,11 +165,41 @@ class Database:
             order['photos'] = json.loads(order['photos'])
         return order
     
-    def add_order_response(self, order_id: int, driver_id: int):
+    def add_driver_offer(self, order_id: int, driver_id: int, price: float, comment: str = None):
+        self.execute(
+            "INSERT INTO driver_offers (order_id, driver_id, price, comment) VALUES (?, ?, ?, ?)",
+            (order_id, driver_id, price, comment)
+        )
+    
+    def get_order_offers(self, order_id: int) -> List[Dict]:
+        return self.fetch_all(
+            """SELECT o.*, d.full_name, d.phone, u.username 
+               FROM driver_offers o 
+               JOIN drivers d ON o.driver_id = d.user_id 
+               JOIN users u ON d.user_id = u.user_id 
+               WHERE o.order_id = ? ORDER BY o.created_at DESC""",
+            (order_id,)
+        )
+    
+    def accept_driver_offer(self, offer_id: int):
+        # Получаем информацию о предложении
+        offer = self.fetch_one("SELECT * FROM driver_offers WHERE offer_id = ?", (offer_id,))
+        if not offer:
+            return False
+        
+        # Добавляем водителя к заказу
         self.execute(
             "INSERT INTO order_responses (order_id, driver_id) VALUES (?, ?)",
-            (order_id, driver_id)
+            (offer['order_id'], offer['driver_id'])
         )
+        
+        # Удаляем остальные предложения для этого заказа
+        self.execute(
+            "DELETE FROM driver_offers WHERE order_id = ? AND offer_id != ?",
+            (offer['order_id'], offer_id)
+        )
+        
+        return True
     
     def get_order_responses(self, order_id: int) -> List[Dict]:
         return self.fetch_all(
@@ -183,7 +222,6 @@ class Database:
             (driver_id, limit)
         )
     
-
     def add_group(self, group_name: str) -> int:
         cursor = self.execute(
             "INSERT INTO groups (group_name) VALUES (?)",
